@@ -1,0 +1,163 @@
+# ===============================================
+# Cargar y preparar los datos 
+# ===============================================
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split, cross_val_score, RandomizedSearchCV
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
+from sklearn.preprocessing import StandardScaler
+
+# Configuración de estilo limpio para los gráficos
+plt.style.use('default')
+plt.rcParams['font.size'] = 10
+plt.rcParams['axes.linewidth'] = 1.0
+
+# 🔹 Cargar tu dataset (ajustá el nombre del archivo o DataFrame)
+df = pd.read_excel("Ingenieria_inversa_fiosina\BD_compuesta_MMD_BA_Mn_Mw.xlsx", sheet_name="compuesta")
+
+# Variables de entrada
+X_cols = ['cBA_time', 'Mn', 'Mw'] + [f'MMD{i+1}' for i in range(100)]
+X = df[X_cols]
+
+# Variables objetivo (condiciones de proceso)
+Y_cols = ['cBA_0', 'cAIBN_0', 'temp', 'time']
+Y = df[Y_cols]
+
+# ===============================================
+# Escalar datos (normalizar magnitudes)
+# Los pesos moleculares tienen magnitudes altas
+# El tiempo como target tambien tiene magnitudes altas
+# Claramente son magnitudes altas tomando como referencia a las concentraciones de BA y AIBN
+# ===============================================
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+Y_scaler = StandardScaler()
+Y_scaled = Y_scaler.fit_transform(Y) 
+
+# ===============================================
+# División entrenamiento / prueba
+# ===============================================
+
+X_train, X_test, Y_train, Y_test = train_test_split(
+    X_scaled, Y_scaled, test_size=0.2, random_state=42
+)
+
+# ===============================================
+# Entrenamiento del modelo con parametros optimizados
+# ===============================================
+
+model = RandomForestRegressor(random_state=42)
+
+param_grid = {
+    'n_estimators': [100, 200, 500],
+    'max_depth': [None, 10, 20, 30],
+    'min_samples_split': [2, 5, 10],
+    'min_samples_leaf': [1, 2, 4]
+}
+
+search = RandomizedSearchCV(model, param_grid, n_iter=20, cv=3, n_jobs=-1, random_state=42)
+search.fit(X_train, Y_train)
+best_model = search.best_estimator_
+
+# ===============================================
+# Predicción y desescalado
+# ===============================================
+
+Y_pred_scaled = best_model.predict(X_test)
+Y_pred = Y_scaler.inverse_transform(Y_pred_scaled)
+Y_test_descaled = Y_scaler.inverse_transform(Y_test)
+
+# ===============================================
+# Métricas y evaluación
+# ===============================================
+
+mse_global = mean_squared_error(Y_test_descaled, Y_pred)
+r2_global = r2_score(Y_test_descaled, Y_pred)
+mae_vars = mean_absolute_error(Y_test_descaled, Y_pred, multioutput='raw_values')
+r2_vars = r2_score(Y_test_descaled, Y_pred, multioutput='raw_values')
+
+print("\nMétricas por variable:")
+for i, col in enumerate(Y.columns):
+    print(f"{col}: MAE={mae_vars[i]:.4f}, R²={r2_vars[i]:.4f}")
+
+print(f"\nMSE Global: {mse_global:.4f}")
+print(f"R² Global: {r2_global:.4f}")
+
+# ===============================================
+# Métricas normalizadas (MAE relativo %)
+# ===============================================
+ranges = {
+    'cBA_0': (0.5, 3.0),
+    'cAIBN_0': (0.0025, 0.02),
+    'temp': (60, 80),        # ajustá según tus datos reales
+    'time': (0, 3600)
+}
+
+mae_relativo = {}
+for i, col in enumerate(Y.columns):
+    r_min, r_max = ranges[col]
+    mae_relativo[col] = 100 * mae_vars[i] / (r_max - r_min)
+    print(f"{col}: MAE relativo = {mae_relativo[col]:.2f}%")
+
+# ===============================================
+# Importancia de variables
+# ===============================================
+importances = best_model.feature_importances_
+sorted_idx = np.argsort(importances)[-10:]
+
+plt.figure(figsize=(8,5))
+plt.barh(np.array(X.columns)[sorted_idx], importances[sorted_idx])
+plt.xlabel("Importancia relativa")
+plt.title("Top 10 variables más influyentes")
+plt.tight_layout()
+plt.show()
+
+# ===============================================
+# Comparación visual: Predicciones vs. Valores reales
+# ===============================================
+for i, col in enumerate(Y.columns):
+    plt.figure(figsize=(5,4))
+    plt.scatter(Y_test_descaled[:, i], Y_pred[:, i], alpha=0.6)
+    plt.plot([Y_test_descaled[:, i].min(), Y_test_descaled[:, i].max()],
+             [Y_test_descaled[:, i].min(), Y_test_descaled[:, i].max()],
+             'r--', lw=2)
+    plt.title(f"Predicción vs Real - {col}")
+    plt.xlabel("Valor real")
+    plt.ylabel("Predicción")
+    plt.tight_layout()
+    plt.show()
+
+    # ===============================================
+# Visualización MMD vs Receta (ejemplo individual)
+# ===============================================
+# Seleccionamos una muestra de prueba
+idx = 5  # cambiá el índice si querés otra muestra
+mmd_cols = [f'MMD{i+1}' for i in range(100)]
+
+# Recuperamos la curva MMD (ya desescalada si corresponde)
+mmd_curve = X_test[idx, -100:]  # las 100 últimas columnas son MMD
+Y_real = Y_test_descaled[idx]
+Y_predic = Y_pred[idx]
+
+plt.figure(figsize=(7,4))
+plt.plot(range(1, 101), mmd_curve, label="Curva MMD (input)", color="gray")
+plt.title("Ejemplo de curva MMD usada como input")
+plt.xlabel("Punto de la distribución (i)")
+plt.ylabel("Frecuencia relativa")
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# Mostrar los valores de receta real vs predicha
+resultado = pd.DataFrame({
+    'Parámetro': Y.columns,
+    'Real': Y_real,
+    'Predicho': Y_predic
+})
+print("\nEjemplo de receta real vs predicha:")
+print(resultado)
